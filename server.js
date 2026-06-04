@@ -55,23 +55,28 @@ function parseSize(title = '') {
 // GET /proxy/yts/:imdbId — proxy YTS (browser can't call it directly due to CORS)
 app.get('/proxy/yts/:imdbId', async (req, res) => {
     try {
-        const r = await fetch(`https://yts.mx/api/v2/movie_details.json?imdb_id=${req.params.imdbId}&with_images=false&with_cast=false`);
+        const r = await fetch(`https://yts.mx/api/v2/movie_details.json?imdb_id=${req.params.imdbId}&with_images=false&with_cast=false`, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+        });
+        if (!r.ok) return res.status(r.status).json({ message: `YTS returned ${r.status}`, body: await r.text().then(t => t.substring(0, 200)) });
         const data = await r.json();
         res.json(data);
     } catch (e) {
-        res.status(500).json({ message: e.message });
+        res.status(500).json({ message: e.message, cause: e.cause?.message, code: e.cause?.code });
     }
 });
 
-// GET /proxy/eztv/:imdbId?season=1&episode=1
 app.get('/proxy/eztv/:imdbId', async (req, res) => {
     try {
         const imdbNum = req.params.imdbId.replace('tt', '');
-        const r = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100`);
+        const r = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100`, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' }
+        });
+        if (!r.ok) return res.status(r.status).json({ message: `EZTV returned ${r.status}`, body: await r.text().then(t => t.substring(0, 200)) });
         const data = await r.json();
         res.json(data);
     } catch (e) {
-        res.status(500).json({ message: e.message });
+        res.status(500).json({ message: e.message, cause: e.cause?.message, code: e.cause?.code });
     }
 });
 
