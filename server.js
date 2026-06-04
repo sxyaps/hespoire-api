@@ -230,6 +230,8 @@ app.get('/hls/start', async (req, res) => {
     }
 
     const dir = path.join(os.tmpdir(), 'hls_' + jobKey);
+    // Fresh start: clear any stale segments from a previous run
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
     fs.mkdirSync(dir, { recursive: true });
     const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}${fileIdx != null ? `&fileIdx=${fileIdx}` : ''}`;
 
