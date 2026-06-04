@@ -127,13 +127,21 @@ app.get('/stream', async (req, res) => {
     const magnet = req.query.magnet;
     if (!magnet) return res.status(400).send('Missing magnet');
 
+    const fileIdx = req.query.fileIdx != null && req.query.fileIdx !== '' ? parseInt(req.query.fileIdx, 10) : null;
+
     try {
         const torrent = await getReadyTorrent(magnet);
 
-        // Largest video file in the torrent
-        const file = torrent.files
-            .filter(f => VIDEO_EXT.test(f.name))
-            .sort((a, b) => b.length - a.length)[0];
+        // Use the exact file index when given (season packs), else largest video file
+        let file = null;
+        if (fileIdx != null && torrent.files[fileIdx] && VIDEO_EXT.test(torrent.files[fileIdx].name)) {
+            file = torrent.files[fileIdx];
+        }
+        if (!file) {
+            file = torrent.files
+                .filter(f => VIDEO_EXT.test(f.name))
+                .sort((a, b) => b.length - a.length)[0];
+        }
         if (!file) return res.status(404).send('No video file in torrent');
 
         // Prioritise streaming this file
@@ -198,16 +206,20 @@ app.get('/hls/start', async (req, res) => {
     const infoHash = hashMatch ? hashMatch[1].toLowerCase() : null;
     if (!infoHash) return res.status(400).json({ message: 'Bad magnet' });
 
+    // Key jobs by hash + file index so different episodes in one season pack don't collide
+    const fileIdx = req.query.fileIdx != null && req.query.fileIdx !== '' ? req.query.fileIdx : null;
+    const jobKey = infoHash + (fileIdx != null ? '_' + fileIdx : '');
+
     // Reuse existing job
-    const existing = hlsJobs.get(infoHash);
+    const existing = hlsJobs.get(jobKey);
     if (existing) {
         existing.lastAccess = Date.now();
-        return res.json({ url: `/hls/${infoHash}/index.m3u8` });
+        return res.json({ url: `/hls/${jobKey}/index.m3u8` });
     }
 
-    const dir = path.join(os.tmpdir(), 'hls_' + infoHash);
+    const dir = path.join(os.tmpdir(), 'hls_' + jobKey);
     fs.mkdirSync(dir, { recursive: true });
-    const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}`;
+    const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}${fileIdx != null ? `&fileIdx=${fileIdx}` : ''}`;
 
     // Copy H.264 video (lossless, fast); transcode anything else (x265 etc.) to H.264
     const vcodec = await probeVideoCodec(input);
@@ -231,14 +243,14 @@ app.get('/hls/start', async (req, res) => {
     proc.stderr.on('data', () => {}); // swallow ffmpeg logging
     proc.on('error', (e) => console.error('ffmpeg spawn error:', e.message));
 
-    hlsJobs.set(infoHash, { dir, proc, lastAccess: Date.now() });
+    hlsJobs.set(jobKey, { dir, proc, lastAccess: Date.now() });
 
     // Resolve once the playlist + first segment exist
     const playlist = path.join(dir, 'index.m3u8');
     const t0 = Date.now();
     const wait = setInterval(() => {
         const ready = fs.existsSync(playlist) && fs.readdirSync(dir).some(f => f.endsWith('.ts'));
-        if (ready) { clearInterval(wait); res.json({ url: `/hls/${infoHash}/index.m3u8` }); }
+        if (ready) { clearInterval(wait); res.json({ url: `/hls/${jobKey}/index.m3u8` }); }
         else if (Date.now() - t0 > 35000) {
             clearInterval(wait);
             if (!res.headersSent) res.status(500).json({ message: 'Transcode timed out (no seeders?)' });
