@@ -60,6 +60,48 @@ async function tmdbFetch(path) {
 }
 
 // ------------------------------------------------------------------
+// Subtitles via OpenSubtitles — searches by IMDB, returns a WebVTT track.
+// Requires a free API key set as the OPENSUBS_KEY env var.
+// ------------------------------------------------------------------
+const OPENSUBS_KEY = process.env.OPENSUBS_KEY || '';
+app.get('/subtitles/:imdbId', async (req, res) => {
+    if (!OPENSUBS_KEY) return res.status(503).json({ message: 'Subtitles not configured' });
+    try {
+        const num = req.params.imdbId.replace('tt', '');
+        const { season, episode } = req.query;
+        const lang = req.query.lang || 'en';
+        const headers = { 'Api-Key': OPENSUBS_KEY, 'User-Agent': 'Hespoire v1.0' };
+
+        let q = `languages=${lang}&order_by=download_count`;
+        if (season && episode) q += `&parent_imdb_id=${num}&season_number=${season}&episode_number=${episode}`;
+        else q += `&imdb_id=${num}`;
+
+        const sRes = await fetch(`https://api.opensubtitles.com/api/v1/subtitles?${q}`, { headers });
+        if (!sRes.ok) return res.status(sRes.status).json({ message: 'Subtitle search failed' });
+        const sData = await sRes.json();
+        const fileId = sData.data?.[0]?.attributes?.files?.[0]?.file_id;
+        if (!fileId) return res.status(404).json({ message: 'No subtitles found' });
+
+        const dRes = await fetch('https://api.opensubtitles.com/api/v1/download', {
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_id: fileId }),
+        });
+        const dData = await dRes.json();
+        if (!dData.link) return res.status(404).json({ message: 'No download link' });
+
+        const srt = await (await fetch(dData.link)).text();
+        // Convert SRT → WebVTT (header + dot-separated millis)
+        const vtt = 'WEBVTT\n\n' + srt.replace(/\r/g, '').replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+        res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(vtt);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// ------------------------------------------------------------------
 // Source lookup endpoints
 // ------------------------------------------------------------------
 app.get('/imdb/:tmdbId', async (req, res) => {
