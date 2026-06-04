@@ -187,14 +187,22 @@ app.get('/stream', async (req, res) => {
 // ------------------------------------------------------------------
 const hlsJobs = new Map(); // infoHash -> { dir, proc, lastAccess }
 
-function probeVideoCodec(inputUrl) {
+function probeMedia(inputUrl) {
     return new Promise((resolve) => {
-        const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-            '-show_entries', 'stream=codec_name', '-of', 'default=nw=1:nk=1', inputUrl]);
+        const p = spawn('ffprobe', ['-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_name',
+            '-show_entries', 'format=duration',
+            '-of', 'json', inputUrl]);
         let out = '';
         p.stdout.on('data', d => out += d);
-        p.on('close', () => resolve(out.trim()));
-        p.on('error', () => resolve(''));
+        p.on('close', () => {
+            try {
+                const j = JSON.parse(out);
+                resolve({ codec: j.streams?.[0]?.codec_name || '', duration: parseFloat(j.format?.duration) || 0 });
+            } catch { resolve({ codec: '', duration: 0 }); }
+        });
+        p.on('error', () => resolve({ codec: '', duration: 0 }));
     });
 }
 
@@ -221,24 +229,32 @@ app.get('/hls/start', async (req, res) => {
     fs.mkdirSync(dir, { recursive: true });
     const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}${fileIdx != null ? `&fileIdx=${fileIdx}` : ''}`;
 
-    // Copy H.264 video (lossless, fast); transcode anything else (x265 etc.) to H.264
-    const vcodec = await probeVideoCodec(input);
-    // H.264 → copy (instant). Anything else (HEVC etc.) must re-encode —
-    // use ultrafast + zerolatency so it keeps up with realtime playback.
-    const vArgs = vcodec === 'h264'
+    // Probe codec (copy vs re-encode) and total duration (for a proper VOD playlist)
+    const { codec, duration } = await probeMedia(input);
+
+    // H.264 → copy (instant, lossless). Anything else (HEVC etc.) must re-encode —
+    // ultrafast + zerolatency so it keeps up with realtime playback.
+    const vArgs = codec === 'h264'
         ? ['-c:v', 'copy']
         : ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '26'];
+
+    // When we know the duration, hand the player a COMPLETE VOD playlist (correct
+    // total length + working seek bar). ffmpeg writes its own playlist to ff.m3u8
+    // (ignored); segments fill in as it transcodes.
+    const SEG = 6;
+    const useVod = duration > SEG;
+    const ffPlaylist = useVod ? path.join(dir, 'ff.m3u8') : path.join(dir, 'index.m3u8');
 
     const args = [
         '-i', input,
         ...vArgs,
         '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
         '-f', 'hls',
-        '-hls_time', '6',
+        '-hls_time', String(SEG),
         '-hls_list_size', '0',
         '-hls_flags', 'independent_segments',
         '-hls_segment_filename', path.join(dir, 'seg_%05d.ts'),
-        path.join(dir, 'index.m3u8'),
+        ffPlaylist,
     ];
 
     const proc = spawn('ffmpeg', args);
@@ -247,11 +263,22 @@ app.get('/hls/start', async (req, res) => {
 
     hlsJobs.set(jobKey, { dir, proc, lastAccess: Date.now() });
 
-    // Resolve once the playlist + first segment exist
-    const playlist = path.join(dir, 'index.m3u8');
+    if (useVod) {
+        const n = Math.ceil(duration / SEG);
+        let pl = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:' + (SEG + 1) +
+            '\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n';
+        for (let i = 0; i < n; i++) {
+            const d = (i === n - 1) ? (duration - i * SEG) : SEG;
+            pl += `#EXTINF:${d.toFixed(3)},\nseg_${String(i).padStart(5, '0')}.ts\n`;
+        }
+        pl += '#EXT-X-ENDLIST\n';
+        fs.writeFileSync(path.join(dir, 'index.m3u8'), pl);
+    }
+
+    // Resolve once index.m3u8 + first segment exist
     const t0 = Date.now();
     const wait = setInterval(() => {
-        const ready = fs.existsSync(playlist) && fs.readdirSync(dir).some(f => f.endsWith('.ts'));
+        const ready = fs.existsSync(path.join(dir, 'index.m3u8')) && fs.existsSync(path.join(dir, 'seg_00000.ts'));
         if (ready) { clearInterval(wait); res.json({ url: `/hls/${jobKey}/index.m3u8` }); }
         else if (Date.now() - t0 > 35000) {
             clearInterval(wait);
