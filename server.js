@@ -169,5 +169,20 @@ io.on('connection', (socket) => {
 // ------------------------------------------------------------------
 app.get('/', (_, res) => res.json({ status: 'ok', rooms: rooms.size }));
 
+app.get('/test', async (_, res) => {
+    const results = {};
+    try {
+        const r = await fetch(`https://api.themoviedb.org/3/movie/603/external_ids?api_key=${TMDB_KEY}`);
+        results.tmdb = { ok: r.ok, status: r.status, data: await r.json() };
+    } catch(e) { results.tmdb = { error: e.message, cause: e.cause?.message }; }
+
+    try {
+        const r = await fetch('https://yts.mx/api/v2/movie_details.json?imdb_id=tt0133093');
+        results.yts = { ok: r.ok, status: r.status };
+    } catch(e) { results.yts = { error: e.message, cause: e.cause?.message }; }
+
+    res.json(results);
+});
+
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => console.log(`Hespoire API on port ${PORT}`));
