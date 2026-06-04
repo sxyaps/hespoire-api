@@ -2,6 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -151,6 +155,104 @@ app.get('/stream', async (req, res) => {
         if (!res.headersSent) res.status(500).send(e.message);
     }
 });
+
+// ------------------------------------------------------------------
+// HLS transcoding — for MKV/EAC3 content (TV) browsers can't play natively
+// ffmpeg copies H.264 video (no quality loss), converts audio to AAC,
+// segments into HLS so it plays everywhere with working seek.
+// ------------------------------------------------------------------
+const hlsJobs = new Map(); // infoHash -> { dir, proc, lastAccess }
+
+function probeVideoCodec(inputUrl) {
+    return new Promise((resolve) => {
+        const p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=codec_name', '-of', 'default=nw=1:nk=1', inputUrl]);
+        let out = '';
+        p.stdout.on('data', d => out += d);
+        p.on('close', () => resolve(out.trim()));
+        p.on('error', () => resolve(''));
+    });
+}
+
+app.get('/hls/start', async (req, res) => {
+    const magnet = req.query.magnet;
+    if (!magnet) return res.status(400).json({ message: 'Missing magnet' });
+
+    const hashMatch = magnet.match(/btih:([a-z0-9]+)/i);
+    const infoHash = hashMatch ? hashMatch[1].toLowerCase() : null;
+    if (!infoHash) return res.status(400).json({ message: 'Bad magnet' });
+
+    // Reuse existing job
+    const existing = hlsJobs.get(infoHash);
+    if (existing) {
+        existing.lastAccess = Date.now();
+        return res.json({ url: `/hls/${infoHash}/index.m3u8` });
+    }
+
+    const dir = path.join(os.tmpdir(), 'hls_' + infoHash);
+    fs.mkdirSync(dir, { recursive: true });
+    const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}`;
+
+    // Copy H.264 video (lossless, fast); transcode anything else (x265 etc.) to H.264
+    const vcodec = await probeVideoCodec(input);
+    const vArgs = vcodec === 'h264'
+        ? ['-c:v', 'copy']
+        : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23'];
+
+    const args = [
+        '-i', input,
+        ...vArgs,
+        '-c:a', 'aac', '-ac', '2', '-b:a', '128k',
+        '-f', 'hls',
+        '-hls_time', '6',
+        '-hls_list_size', '0',
+        '-hls_flags', 'independent_segments',
+        '-hls_segment_filename', path.join(dir, 'seg_%05d.ts'),
+        path.join(dir, 'index.m3u8'),
+    ];
+
+    const proc = spawn('ffmpeg', args);
+    proc.stderr.on('data', () => {}); // swallow ffmpeg logging
+    proc.on('error', (e) => console.error('ffmpeg spawn error:', e.message));
+
+    hlsJobs.set(infoHash, { dir, proc, lastAccess: Date.now() });
+
+    // Resolve once the playlist + first segment exist
+    const playlist = path.join(dir, 'index.m3u8');
+    const t0 = Date.now();
+    const wait = setInterval(() => {
+        const ready = fs.existsSync(playlist) && fs.readdirSync(dir).some(f => f.endsWith('.ts'));
+        if (ready) { clearInterval(wait); res.json({ url: `/hls/${infoHash}/index.m3u8` }); }
+        else if (Date.now() - t0 > 35000) {
+            clearInterval(wait);
+            if (!res.headersSent) res.status(500).json({ message: 'Transcode timed out (no seeders?)' });
+        }
+    }, 400);
+});
+
+app.get('/hls/:hash/:file', (req, res) => {
+    const job = hlsJobs.get(req.params.hash);
+    if (!job) return res.status(404).end();
+    job.lastAccess = Date.now();
+    const file = path.join(job.dir, path.basename(req.params.file));
+    if (!fs.existsSync(file)) return res.status(404).end();
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (file.endsWith('.m3u8')) res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+    else if (file.endsWith('.ts')) res.setHeader('Content-Type', 'video/mp2t');
+    fs.createReadStream(file).pipe(res);
+});
+
+// Clean up idle transcode jobs (kill ffmpeg, delete temp segments)
+setInterval(() => {
+    const now = Date.now();
+    for (const [hash, job] of hlsJobs) {
+        if (now - job.lastAccess > 5 * 60 * 1000) {
+            try { job.proc.kill('SIGKILL'); } catch {}
+            try { fs.rmSync(job.dir, { recursive: true, force: true }); } catch {}
+            hlsJobs.delete(hash);
+        }
+    }
+}, 60000);
 
 // Live torrent stats for the player UI
 app.get('/stream-stats', (req, res) => {
