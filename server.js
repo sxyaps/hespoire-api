@@ -81,9 +81,19 @@ app.get('/proxy/yts/:imdbId', async (req, res) => {
 app.get('/proxy/eztv/:imdbId', async (req, res) => {
     try {
         const imdbNum = req.params.imdbId.replace('tt', '');
-        const r = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100`, { headers: { 'User-Agent': UA } });
-        if (!r.ok) return res.status(r.status).json({ message: `EZTV ${r.status}` });
-        res.json(await r.json());
+        // EZTV returns newest-first, 100/page. Page through so old episodes are found too.
+        let all = [];
+        let total = Infinity;
+        for (let page = 1; page <= 8 && all.length < total; page++) {
+            const r = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100&page=${page}`, { headers: { 'User-Agent': UA } });
+            if (!r.ok) break;
+            const data = await r.json();
+            total = data.torrents_count || 0;
+            const batch = data.torrents || [];
+            if (!batch.length) break;
+            all = all.concat(batch);
+        }
+        res.json({ torrents_count: total, torrents: all });
     } catch (e) {
         res.status(500).json({ message: e.message });
     }
