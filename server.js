@@ -65,34 +65,53 @@ app.get('/streams/:tmdbId', async (req, res) => {
         const imdbId = ext.imdb_id;
         if (!imdbId) return res.status(404).json({ message: 'No IMDB ID found for this title' });
 
-        // 2. Fetch from Torrentio
-        const torrentioPath = type === 'tv'
-            ? `https://torrentio.strem.fun/stream/series/${imdbId}:${season}:${episode}.json`
-            : `https://torrentio.strem.fun/stream/movie/${imdbId}.json`;
+        // 2. Fetch streams — movies from YTS, TV from EZTV
+        let rawTorrents = [];
 
-        const tRes = await fetch(torrentioPath, {
-            headers: { 'User-Agent': 'Mozilla/5.0' }
-        });
-        if (!tRes.ok) throw new Error(`Torrentio ${tRes.status}`);
-        const tData = await tRes.json();
+        if (type === 'tv') {
+            const imdbNum = imdbId.replace('tt', '');
+            const ezRes = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100`);
+            if (ezRes.ok) {
+                const ezData = await ezRes.json();
+                rawTorrents = (ezData.torrents || [])
+                    .filter(t => {
+                        const title = t.title || '';
+                        const sMatch = title.match(/S(\d+)E(\d+)/i);
+                        if (!sMatch) return false;
+                        return parseInt(sMatch[1]) === parseInt(season) && parseInt(sMatch[2]) === parseInt(episode);
+                    })
+                    .map(t => ({
+                        quality: parseQuality(t.title),
+                        seeders: t.seeds || 0,
+                        size: t.size_bytes ? (t.size_bytes / 1e9).toFixed(1) + ' GB' : '',
+                        hash: t.hash,
+                        magnet: t.magnet_url || `magnet:?xt=urn:btih:${t.hash}&dn=${encodeURIComponent(t.title)}${TRACKERS}`,
+                        fileIdx: 0,
+                    }));
+            }
+        } else {
+            const ytsRes = await fetch(`https://yts.mx/api/v2/movie_details.json?imdb_id=${imdbId}&with_images=false&with_cast=false`);
+            if (ytsRes.ok) {
+                const ytsData = await ytsRes.json();
+                rawTorrents = (ytsData.data?.movie?.torrents || []).map(t => ({
+                    quality: t.quality + (t.video_codec ? ' ' + t.video_codec : ''),
+                    seeders: t.seeds || 0,
+                    size: t.size || '',
+                    hash: t.hash,
+                    magnet: `magnet:?xt=urn:btih:${t.hash}&dn=${encodeURIComponent(ytsData.data.movie.title_long)}${TRACKERS}`,
+                    fileIdx: 0,
+                }));
+            }
+        }
 
-        // 3. Format streams
-        const streams = (tData.streams || [])
-            .filter(s => s.infoHash)
-            .slice(0, 15)
-            .map((s, i) => {
-                const fullTitle = s.title || s.name || '';
-                const quality   = parseQuality(fullTitle);
-                const seeders   = parseSeeders(fullTitle);
-                const size      = parseSize(fullTitle);
-                const magnet    = `magnet:?xt=urn:btih:${s.infoHash}&dn=${encodeURIComponent(fullTitle)}${TRACKERS}`;
-                return { id: i, quality, seeders, size, magnet, fileIdx: s.fileIdx || 0, raw: fullTitle };
-            })
-            .sort((a, b) => b.seeders - a.seeders);
+        const streams = rawTorrents
+            .filter(t => t.hash || t.magnet)
+            .sort((a, b) => b.seeders - a.seeders)
+            .slice(0, 10);
 
-        if (!streams.length) return res.status(404).json({ message: 'No streams found' });
+        if (!streams.length) return res.status(404).json({ message: 'No streams found for this title' });
 
-        res.json({ streams });
+        res.json({ streams: streams.map((s, i) => ({ ...s, id: i })) });
     } catch (e) {
         console.error('/streams error:', e.message);
         res.status(500).json({ message: e.message });
