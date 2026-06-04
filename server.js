@@ -210,6 +210,56 @@ function probeMedia(inputUrl) {
     });
 }
 
+// --- HLS cache + concurrency control ---
+const MAX_CONCURRENT_TRANSCODES = 3;
+const MAX_CACHE_BYTES = 20 * 1024 * 1024 * 1024; // 20 GB of cached transcodes
+
+function runningTranscodes() {
+    let n = 0;
+    for (const j of hlsJobs.values()) if (j.proc && j.proc.exitCode === null) n++;
+    return n;
+}
+
+// A transcode is "complete" if the playlist ends and its last segment exists on disk
+function hlsComplete(dir) {
+    try {
+        const pl = fs.readFileSync(path.join(dir, 'index.m3u8'), 'utf8');
+        if (!pl.includes('#EXT-X-ENDLIST')) return false;
+        const segs = pl.match(/seg_\d+\.ts/g);
+        if (!segs || !segs.length) return false;
+        return fs.existsSync(path.join(dir, segs[segs.length - 1]));
+    } catch { return false; }
+}
+
+function dirSize(dir) {
+    let total = 0;
+    try { for (const f of fs.readdirSync(dir)) { try { total += fs.statSync(path.join(dir, f)).size; } catch {} } } catch {}
+    return total;
+}
+
+// Evict least-recently-used cached transcodes when over the size cap
+function evictCache() {
+    try {
+        const tmp = os.tmpdir();
+        const dirs = fs.readdirSync(tmp).filter(d => d.startsWith('hls_')).map(d => {
+            const full = path.join(tmp, d);
+            let mtime = 0; try { mtime = fs.statSync(full).mtimeMs; } catch {}
+            return { key: d.slice(4), full, mtime, size: dirSize(full) };
+        });
+        let total = dirs.reduce((s, d) => s + d.size, 0);
+        if (total <= MAX_CACHE_BYTES) return;
+        dirs.sort((a, b) => a.mtime - b.mtime); // oldest first
+        for (const d of dirs) {
+            if (total <= MAX_CACHE_BYTES) break;
+            const job = hlsJobs.get(d.key);
+            if (job && job.proc && job.proc.exitCode === null) continue; // never evict an active transcode
+            try { fs.rmSync(d.full, { recursive: true, force: true }); } catch {}
+            hlsJobs.delete(d.key);
+            total -= d.size;
+        }
+    } catch {}
+}
+
 app.get('/hls/start', async (req, res) => {
     const magnet = req.query.magnet;
     if (!magnet) return res.status(400).json({ message: 'Missing magnet' });
@@ -221,18 +271,30 @@ app.get('/hls/start', async (req, res) => {
     // Key jobs by hash + file index so different episodes in one season pack don't collide
     const fileIdx = req.query.fileIdx != null && req.query.fileIdx !== '' ? req.query.fileIdx : null;
     const jobKey = infoHash + (fileIdx != null ? '_' + fileIdx : '');
+    const dir = path.join(os.tmpdir(), 'hls_' + jobKey);
 
-    // Reuse existing job
+    // 1. Active job in memory → reuse (shared across concurrent viewers of same title)
     const existing = hlsJobs.get(jobKey);
     if (existing) {
         existing.lastAccess = Date.now();
         return res.json({ url: `/hls/${jobKey}/index.m3u8` });
     }
 
-    const dir = path.join(os.tmpdir(), 'hls_' + jobKey);
-    // Fresh start: clear any stale segments from a previous run
+    // 2. Fully cached on disk → reuse instantly, no download/transcode (survives restarts)
+    if (hlsComplete(dir)) {
+        hlsJobs.set(jobKey, { dir, proc: null, lastAccess: Date.now() });
+        return res.json({ url: `/hls/${jobKey}/index.m3u8`, cached: true });
+    }
+
+    // 3. Protect the box: cap simultaneous transcodes, degrade gracefully
+    if (runningTranscodes() >= MAX_CONCURRENT_TRANSCODES) {
+        return res.status(503).json({ message: 'Server busy — too many streams running right now. Try again in a moment.' });
+    }
+
+    // Fresh transcode
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
     fs.mkdirSync(dir, { recursive: true });
+    evictCache();
     const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}${fileIdx != null ? `&fileIdx=${fileIdx}` : ''}`;
 
     // Probe total duration + resolution (for a proper VOD playlist + bitrate)
@@ -311,16 +373,30 @@ app.get('/hls/:hash/:file', (req, res) => {
     fs.createReadStream(file).pipe(res);
 });
 
-// Clean up idle transcode jobs (kill ffmpeg, delete temp segments)
+// Idle cleanup: stop transcoding/downloading idle streams, but KEEP completed
+// transcodes on disk as cache (so re-watching is instant). LRU size cap handles disk.
 setInterval(() => {
     const now = Date.now();
-    for (const [hash, job] of hlsJobs) {
-        if (now - job.lastAccess > 5 * 60 * 1000) {
-            try { job.proc.kill('SIGKILL'); } catch {}
-            try { fs.rmSync(job.dir, { recursive: true, force: true }); } catch {}
-            hlsJobs.delete(hash);
+    for (const [key, job] of hlsJobs) {
+        if (now - job.lastAccess > 10 * 60 * 1000) {
+            try { if (job.proc) job.proc.kill('SIGKILL'); } catch {}
+
+            // Free the torrent (bandwidth/memory) if no other active job needs it
+            const ih = key.split('_')[0];
+            const stillUsed = [...hlsJobs.keys()].some(k => k !== key && k.split('_')[0] === ih);
+            if (!stillUsed && client) {
+                const t = client.torrents.find(t => t.infoHash === ih);
+                if (t) { try { t.destroy(); } catch {} }
+            }
+
+            if (!hlsComplete(job.dir)) {
+                // Incomplete — not useful as cache, remove it
+                try { fs.rmSync(job.dir, { recursive: true, force: true }); } catch {}
+            }
+            hlsJobs.delete(key); // completed dirs stay on disk as cold cache
         }
     }
+    evictCache();
 }, 60000);
 
 // Live torrent stats for the player UI
