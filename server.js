@@ -52,6 +52,29 @@ function parseSize(title = '') {
 // Streams endpoint
 // ------------------------------------------------------------------
 
+// GET /proxy/yts/:imdbId — proxy YTS (browser can't call it directly due to CORS)
+app.get('/proxy/yts/:imdbId', async (req, res) => {
+    try {
+        const r = await fetch(`https://yts.mx/api/v2/movie_details.json?imdb_id=${req.params.imdbId}&with_images=false&with_cast=false`);
+        const data = await r.json();
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+
+// GET /proxy/eztv/:imdbId?season=1&episode=1
+app.get('/proxy/eztv/:imdbId', async (req, res) => {
+    try {
+        const imdbNum = req.params.imdbId.replace('tt', '');
+        const r = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100`);
+        const data = await r.json();
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ message: e.message });
+    }
+});
+
 // GET /imdb/:tmdbId?type=movie|tv  — just resolves TMDB ID → IMDB ID
 // The client handles torrent searching directly (avoids server-side domain blocks)
 app.get('/imdb/:tmdbId', async (req, res) => {
