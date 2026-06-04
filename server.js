@@ -52,70 +52,17 @@ function parseSize(title = '') {
 // Streams endpoint
 // ------------------------------------------------------------------
 
-// GET /streams/:tmdbId?type=movie|tv&season=1&episode=1
-app.get('/streams/:tmdbId', async (req, res) => {
+// GET /imdb/:tmdbId?type=movie|tv  — just resolves TMDB ID → IMDB ID
+// The client handles torrent searching directly (avoids server-side domain blocks)
+app.get('/imdb/:tmdbId', async (req, res) => {
     const { tmdbId } = req.params;
-    const type    = req.query.type || 'movie';
-    const season  = req.query.season  || 1;
-    const episode = req.query.episode || 1;
-
+    const type = req.query.type || 'movie';
     try {
-        // 1. Get IMDB ID from TMDB
-        console.log('Fetching IMDB ID for', tmdbId, type);
         const ext = await tmdbFetch(`/${type === 'tv' ? 'tv' : 'movie'}/${tmdbId}/external_ids`);
-        const imdbId = ext.imdb_id;
-        console.log('IMDB ID:', imdbId);
-        if (!imdbId) return res.status(404).json({ message: 'No IMDB ID found for this title' });
-
-        // 2. Fetch streams — movies from YTS, TV from EZTV
-        let rawTorrents = [];
-
-        if (type === 'tv') {
-            const imdbNum = imdbId.replace('tt', '');
-            const ezRes = await fetch(`https://eztv.re/api/get-torrents?imdb_id=${imdbNum}&limit=100`);
-            if (ezRes.ok) {
-                const ezData = await ezRes.json();
-                rawTorrents = (ezData.torrents || [])
-                    .filter(t => {
-                        const title = t.title || '';
-                        const sMatch = title.match(/S(\d+)E(\d+)/i);
-                        if (!sMatch) return false;
-                        return parseInt(sMatch[1]) === parseInt(season) && parseInt(sMatch[2]) === parseInt(episode);
-                    })
-                    .map(t => ({
-                        quality: parseQuality(t.title),
-                        seeders: t.seeds || 0,
-                        size: t.size_bytes ? (t.size_bytes / 1e9).toFixed(1) + ' GB' : '',
-                        hash: t.hash,
-                        magnet: t.magnet_url || `magnet:?xt=urn:btih:${t.hash}&dn=${encodeURIComponent(t.title)}${TRACKERS}`,
-                        fileIdx: 0,
-                    }));
-            }
-        } else {
-            const ytsRes = await fetch(`https://yts.mx/api/v2/movie_details.json?imdb_id=${imdbId}&with_images=false&with_cast=false`);
-            if (ytsRes.ok) {
-                const ytsData = await ytsRes.json();
-                rawTorrents = (ytsData.data?.movie?.torrents || []).map(t => ({
-                    quality: t.quality + (t.video_codec ? ' ' + t.video_codec : ''),
-                    seeders: t.seeds || 0,
-                    size: t.size || '',
-                    hash: t.hash,
-                    magnet: `magnet:?xt=urn:btih:${t.hash}&dn=${encodeURIComponent(ytsData.data.movie.title_long)}${TRACKERS}`,
-                    fileIdx: 0,
-                }));
-            }
-        }
-
-        const streams = rawTorrents
-            .filter(t => t.hash || t.magnet)
-            .sort((a, b) => b.seeders - a.seeders)
-            .slice(0, 10);
-
-        if (!streams.length) return res.status(404).json({ message: 'No streams found for this title' });
-
-        res.json({ streams: streams.map((s, i) => ({ ...s, id: i })) });
+        if (!ext.imdb_id) return res.status(404).json({ message: 'No IMDB ID found' });
+        res.json({ imdbId: ext.imdb_id });
     } catch (e) {
-        console.error('/streams error:', e.message, e.cause?.message || '');
+        console.error('/imdb error:', e.message);
         res.status(500).json({ message: e.message });
     }
 });
@@ -168,31 +115,6 @@ io.on('connection', (socket) => {
 
 // ------------------------------------------------------------------
 app.get('/', (_, res) => res.json({ status: 'ok', rooms: rooms.size }));
-
-app.get('/test', async (_, res) => {
-    const results = {};
-    try {
-        const r = await fetch(`https://api.themoviedb.org/3/movie/603/external_ids?api_key=${TMDB_KEY}`);
-        results.tmdb = { ok: r.ok, status: r.status, data: await r.json() };
-    } catch(e) { results.tmdb = { error: e.message, cause: e.cause?.message }; }
-
-    try {
-        const r = await fetch('https://yts.mx/api/v2/movie_details.json?imdb_id=tt0133093');
-        results.yts = { ok: r.ok, status: r.status };
-    } catch(e) { results.yts = { error: e.message, cause: e.cause?.message }; }
-
-    try {
-        const r = await fetch('https://apibay.org/q.php?q=the+matrix+1999&cat=207');
-        results.apibay = { ok: r.ok, status: r.status, preview: (await r.text()).substring(0, 200) };
-    } catch(e) { results.apibay = { error: e.message, cause: e.cause?.message }; }
-
-    try {
-        const r = await fetch('https://eztv.re/api/get-torrents?imdb_id=306414&limit=5');
-        results.eztv = { ok: r.ok, status: r.status };
-    } catch(e) { results.eztv = { error: e.message, cause: e.cause?.message }; }
-
-    res.json(results);
-});
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => console.log(`Hespoire API on port ${PORT}`));
