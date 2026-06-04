@@ -191,7 +191,7 @@ function probeMedia(inputUrl) {
     return new Promise((resolve) => {
         const p = spawn('ffprobe', ['-v', 'error',
             '-select_streams', 'v:0',
-            '-show_entries', 'stream=codec_name',
+            '-show_entries', 'stream=codec_name,height',
             '-show_entries', 'format=duration',
             '-of', 'json', inputUrl]);
         let out = '';
@@ -199,10 +199,14 @@ function probeMedia(inputUrl) {
         p.on('close', () => {
             try {
                 const j = JSON.parse(out);
-                resolve({ codec: j.streams?.[0]?.codec_name || '', duration: parseFloat(j.format?.duration) || 0 });
-            } catch { resolve({ codec: '', duration: 0 }); }
+                resolve({
+                    codec: j.streams?.[0]?.codec_name || '',
+                    height: j.streams?.[0]?.height || 0,
+                    duration: parseFloat(j.format?.duration) || 0,
+                });
+            } catch { resolve({ codec: '', height: 0, duration: 0 }); }
         });
-        p.on('error', () => resolve({ codec: '', duration: 0 }));
+        p.on('error', () => resolve({ codec: '', height: 0, duration: 0 }));
     });
 }
 
@@ -229,19 +233,25 @@ app.get('/hls/start', async (req, res) => {
     fs.mkdirSync(dir, { recursive: true });
     const input = `http://127.0.0.1:${PORT}/stream?magnet=${encodeURIComponent(magnet)}${fileIdx != null ? `&fileIdx=${fileIdx}` : ''}`;
 
-    // Probe codec (copy vs re-encode) and total duration (for a proper VOD playlist)
-    const { codec, duration } = await probeMedia(input);
+    // Probe total duration + resolution (for a proper VOD playlist + bitrate)
+    const { duration, height } = await probeMedia(input);
 
-    // H.264 → copy (instant, lossless). Anything else (HEVC etc.) must re-encode —
-    // ultrafast + zerolatency so it keeps up with realtime playback.
-    const vArgs = codec === 'h264'
-        ? ['-c:v', 'copy']
-        : ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '26'];
-
-    // When we know the duration, hand the player a COMPLETE VOD playlist (correct
-    // total length + working seek bar). ffmpeg writes its own playlist to ff.m3u8
-    // (ignored); segments fill in as it transcodes.
     const SEG = 6;
+
+    // Re-encode video with a forced keyframe every SEG seconds so each segment is
+    // cleanly, independently decodable (fixes video-freeze-while-audio-plays) and
+    // exactly matches the uniform VOD playlist. Use the Mac's hardware encoder
+    // (VideoToolbox) so it's fast and low-CPU — no stutter.
+    const vbitrate = height >= 2000 ? '16000k' : height >= 1080 ? '6000k' : height >= 720 ? '3000k' : '1500k';
+    const vArgs = [
+        '-c:v', 'h264_videotoolbox',
+        '-realtime', '1',
+        '-b:v', vbitrate,
+        '-force_key_frames', `expr:gte(t,n_forced*${SEG})`,
+    ];
+
+    // Hand the player a COMPLETE VOD playlist (correct total length + working seek
+    // bar). ffmpeg writes its own playlist to ff.m3u8 (ignored); segments fill in.
     const useVod = duration > SEG;
     const ffPlaylist = useVod ? path.join(dir, 'ff.m3u8') : path.join(dir, 'index.m3u8');
 
