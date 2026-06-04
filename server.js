@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const zlib = require('zlib');
 
 const app = express();
 const httpServer = http.createServer(app);
@@ -60,38 +61,37 @@ async function tmdbFetch(path) {
 }
 
 // ------------------------------------------------------------------
-// Subtitles via OpenSubtitles — searches by IMDB, returns a WebVTT track.
-// Requires a free API key set as the OPENSUBS_KEY env var.
+// Subtitles via the legacy OpenSubtitles REST API — keyless, no per-day cap.
+// (The same endpoint Kodi/Stremio subtitle addons use.)
 // ------------------------------------------------------------------
-const OPENSUBS_KEY = process.env.OPENSUBS_KEY || '';
 app.get('/subtitles/:imdbId', async (req, res) => {
-    if (!OPENSUBS_KEY) return res.status(503).json({ message: 'Subtitles not configured' });
     try {
         const num = req.params.imdbId.replace('tt', '');
         const { season, episode } = req.query;
-        const lang = req.query.lang || 'en';
-        const headers = { 'Api-Key': OPENSUBS_KEY, 'User-Agent': 'Hespoire v1.0' };
+        const lang = req.query.lang || 'eng'; // legacy uses 3-letter codes
 
-        let q = `languages=${lang}&order_by=download_count`;
-        if (season && episode) q += `&parent_imdb_id=${num}&season_number=${season}&episode_number=${episode}`;
-        else q += `&imdb_id=${num}`;
+        const path = (season && episode)
+            ? `/search/episode-${episode}/imdbid-${num}/season-${season}/sublanguageid-${lang}`
+            : `/search/imdbid-${num}/sublanguageid-${lang}`;
 
-        const sRes = await fetch(`https://api.opensubtitles.com/api/v1/subtitles?${q}`, { headers });
-        if (!sRes.ok) return res.status(sRes.status).json({ message: 'Subtitle search failed' });
-        const sData = await sRes.json();
-        const fileId = sData.data?.[0]?.attributes?.files?.[0]?.file_id;
-        if (!fileId) return res.status(404).json({ message: 'No subtitles found' });
-
-        const dRes = await fetch('https://api.opensubtitles.com/api/v1/download', {
-            method: 'POST',
-            headers: { ...headers, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ file_id: fileId }),
+        const sRes = await fetch(`https://rest.opensubtitles.org${path}`, {
+            headers: { 'X-User-Agent': 'TemporaryUserAgent' },
         });
-        const dData = await dRes.json();
-        if (!dData.link) return res.status(404).json({ message: 'No download link' });
+        if (!sRes.ok) return res.status(sRes.status).json({ message: 'Subtitle search failed' });
+        const arr = await sRes.json();
+        if (!Array.isArray(arr) || !arr.length) return res.status(404).json({ message: 'No subtitles found' });
 
-        const srt = await (await fetch(dData.link)).text();
-        // Convert SRT → WebVTT (header + dot-separated millis)
+        // Best by download count
+        arr.sort((a, b) => (+b.SubDownloadsCnt || 0) - (+a.SubDownloadsCnt || 0));
+        const link = arr[0].SubDownloadLink;
+        if (!link) return res.status(404).json({ message: 'No subtitle file' });
+
+        // Download (gzipped SRT) → gunzip → SRT
+        const gz = Buffer.from(await (await fetch(link)).arrayBuffer());
+        let srt;
+        try { srt = zlib.gunzipSync(gz).toString('utf8'); } catch { srt = gz.toString('utf8'); }
+
+        // SRT → WebVTT
         const vtt = 'WEBVTT\n\n' + srt.replace(/\r/g, '').replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
         res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
         res.setHeader('Access-Control-Allow-Origin', '*');
