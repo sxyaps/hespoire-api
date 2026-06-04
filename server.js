@@ -82,6 +82,22 @@ app.get('/proxy/yts/:imdbId', async (req, res) => {
     }
 });
 
+// Torrentio aggregates many indexers — returns streams by IMDB id
+// /proxy/torrentio/movie/tt123  OR  /proxy/torrentio/series/tt123?season=1&episode=2
+app.get('/proxy/torrentio/:type/:imdbId', async (req, res) => {
+    try {
+        const { type, imdbId } = req.params;
+        const url = type === 'series'
+            ? `https://torrentio.strem.fun/stream/series/${imdbId}:${req.query.season || 1}:${req.query.episode || 1}.json`
+            : `https://torrentio.strem.fun/stream/movie/${imdbId}.json`;
+        const r = await fetch(url, { headers: { 'User-Agent': UA } });
+        if (!r.ok) return res.status(r.status).json({ message: `Torrentio ${r.status}` });
+        res.json(await r.json());
+    } catch (e) {
+        res.status(500).json({ message: e.message, cause: e.cause?.message });
+    }
+});
+
 app.get('/proxy/eztv/:imdbId', async (req, res) => {
     try {
         const imdbNum = req.params.imdbId.replace('tt', '');
