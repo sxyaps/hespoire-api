@@ -181,6 +181,16 @@ app.get('/test', async (_, res) => {
         results.yts = { ok: r.ok, status: r.status };
     } catch(e) { results.yts = { error: e.message, cause: e.cause?.message }; }
 
+    try {
+        const r = await fetch('https://apibay.org/q.php?q=the+matrix+1999&cat=207');
+        results.apibay = { ok: r.ok, status: r.status, preview: (await r.text()).substring(0, 200) };
+    } catch(e) { results.apibay = { error: e.message, cause: e.cause?.message }; }
+
+    try {
+        const r = await fetch('https://eztv.re/api/get-torrents?imdb_id=306414&limit=5');
+        results.eztv = { ok: r.ok, status: r.status };
+    } catch(e) { results.eztv = { error: e.message, cause: e.cause?.message }; }
+
     res.json(results);
 });
 
