@@ -223,9 +223,11 @@ app.get('/hls/start', async (req, res) => {
 
     // Copy H.264 video (lossless, fast); transcode anything else (x265 etc.) to H.264
     const vcodec = await probeVideoCodec(input);
+    // H.264 → copy (instant). Anything else (HEVC etc.) must re-encode —
+    // use ultrafast + zerolatency so it keeps up with realtime playback.
     const vArgs = vcodec === 'h264'
         ? ['-c:v', 'copy']
-        : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23'];
+        : ['-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-crf', '26'];
 
     const args = [
         '-i', input,
