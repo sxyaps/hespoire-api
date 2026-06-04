@@ -61,8 +61,10 @@ app.get('/streams/:tmdbId', async (req, res) => {
 
     try {
         // 1. Get IMDB ID from TMDB
+        console.log('Fetching IMDB ID for', tmdbId, type);
         const ext = await tmdbFetch(`/${type === 'tv' ? 'tv' : 'movie'}/${tmdbId}/external_ids`);
         const imdbId = ext.imdb_id;
+        console.log('IMDB ID:', imdbId);
         if (!imdbId) return res.status(404).json({ message: 'No IMDB ID found for this title' });
 
         // 2. Fetch streams — movies from YTS, TV from EZTV
@@ -113,7 +115,7 @@ app.get('/streams/:tmdbId', async (req, res) => {
 
         res.json({ streams: streams.map((s, i) => ({ ...s, id: i })) });
     } catch (e) {
-        console.error('/streams error:', e.message);
+        console.error('/streams error:', e.message, e.cause?.message || '');
         res.status(500).json({ message: e.message });
     }
 });
