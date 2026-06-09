@@ -23,16 +23,22 @@ const VIDEO_EXT = /\.(mp4|mkv|webm|avi|mov|m4v)$/i;
 // WebTorrent client (ESM — loaded via dynamic import)
 // ------------------------------------------------------------------
 let client = null;
+let clientError = null;
 (async () => {
-    const WebTorrent = (await import('webtorrent')).default;
-    client = new WebTorrent();
-    console.log('WebTorrent client ready');
+    try {
+        const WebTorrent = (await import('webtorrent')).default;
+        client = new WebTorrent();
+        console.log('WebTorrent client ready');
+    } catch (e) {
+        clientError = e;
+        console.error('WebTorrent failed to load:', e && e.stack || e);
+    }
 })();
 
 // Get an existing torrent or add it, resolve once metadata is ready
 function getReadyTorrent(magnet) {
     return new Promise((resolve, reject) => {
-        if (!client) return reject(new Error('Torrent client still starting'));
+        if (!client) return reject(new Error(clientError ? ('Torrent engine error: ' + clientError.message) : 'Torrent client still starting'));
 
         // Reuse if already added
         const hashMatch = magnet.match(/btih:([a-z0-9]+)/i);
@@ -498,7 +504,12 @@ io.on('connection', (socket) => {
 });
 
 // ------------------------------------------------------------------
-app.get('/', (_, res) => res.json({ status: 'ok', torrents: client?.torrents.length || 0, rooms: rooms.size }));
+app.get('/', (_, res) => res.json({
+    status: 'ok',
+    torrentEngine: client ? 'ready' : (clientError ? 'FAILED: ' + clientError.message : 'starting'),
+    torrents: client?.torrents.length || 0,
+    rooms: rooms.size,
+}));
 
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => console.log(`Hespoire API on port ${PORT}`));
