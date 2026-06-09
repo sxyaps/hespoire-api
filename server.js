@@ -373,15 +373,14 @@ app.get('/hls/start', async (req, res) => {
 
     // Re-encode video with a forced keyframe every SEG seconds so each segment is
     // cleanly, independently decodable (fixes video-freeze-while-audio-plays) and
-    // exactly matches the uniform VOD playlist. Use the Mac's hardware encoder
-    // (VideoToolbox) so it's fast and low-CPU — no stutter.
+    // exactly matches the uniform VOD playlist.
     const vbitrate = height >= 2000 ? '16000k' : height >= 1080 ? '6000k' : height >= 720 ? '3000k' : '1500k';
-    const vArgs = [
-        '-c:v', 'h264_videotoolbox',
-        '-realtime', '1',
-        '-b:v', vbitrate,
-        '-force_key_frames', `expr:gte(t,n_forced*${SEG})`,
-    ];
+    const forceKf = `expr:gte(t,n_forced*${SEG})`;
+    const vArgs = process.platform === 'darwin'
+        // macOS: hardware encoder (fast, low-CPU)
+        ? ['-c:v', 'h264_videotoolbox', '-realtime', '1', '-b:v', vbitrate, '-force_key_frames', forceKf]
+        // Linux/VPS: software x264 (no hardware encoder available)
+        : ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-force_key_frames', forceKf];
 
     // Hand the player a COMPLETE VOD playlist (correct total length + working seek
     // bar). ffmpeg writes its own playlist to ff.m3u8 (ignored); segments fill in.
