@@ -35,6 +35,24 @@ let clientError = null;
     }
 })();
 
+// High-uptime public trackers — injected into every magnet so peer discovery
+// is fast (Torrentio magnets ship with very few trackers).
+const EXTRA_TRACKERS = [
+    'udp://tracker.opentrackr.org:1337/announce',
+    'udp://open.tracker.cl:1337/announce',
+    'udp://tracker.openbittorrent.com:6969/announce',
+    'udp://exodus.desync.com:6969/announce',
+    'udp://tracker.torrent.eu.org:451/announce',
+    'udp://open.stealth.si:80/announce',
+    'udp://tracker.dler.org:6969/announce',
+    'udp://explodie.org:6969/announce',
+    'udp://tracker1.bt.moack.co.kr:80/announce',
+    'udp://tracker.tiny-vps.com:6969/announce',
+];
+function withTrackers(magnet) {
+    return magnet + EXTRA_TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join('');
+}
+
 // Get an existing torrent or add it, resolve once metadata is ready
 function getReadyTorrent(magnet) {
     return new Promise((resolve, reject) => {
@@ -50,10 +68,13 @@ function getReadyTorrent(magnet) {
             return;
         }
 
-        const torrent = client.add(magnet, { destroyStoreOnDestroy: true });
-        const timeout = setTimeout(() => reject(new Error('Timed out finding peers')), 25000);
+        const torrent = client.add(withTrackers(magnet), { destroyStoreOnDestroy: true });
+        const timeout = setTimeout(() => {
+            try { torrent.destroy(); } catch {}   // don't leave dead torrents lingering
+            reject(new Error('Timed out finding peers'));
+        }, 45000);
         torrent.once('ready', () => { clearTimeout(timeout); resolve(torrent); });
-        torrent.once('error', (e) => { clearTimeout(timeout); reject(e); });
+        torrent.once('error', (e) => { clearTimeout(timeout); try { torrent.destroy(); } catch {} reject(e); });
     });
 }
 
@@ -402,7 +423,7 @@ app.get('/hls/start', async (req, res) => {
     const wait = setInterval(() => {
         const ready = fs.existsSync(path.join(dir, 'index.m3u8')) && fs.existsSync(path.join(dir, 'seg_00000.ts'));
         if (ready) { clearInterval(wait); res.json({ url: `/hls/${jobKey}/index.m3u8` }); }
-        else if (Date.now() - t0 > 35000) {
+        else if (Date.now() - t0 > 55000) {
             clearInterval(wait);
             if (!res.headersSent) res.status(500).json({ message: 'Transcode timed out (no seeders?)' });
         }
